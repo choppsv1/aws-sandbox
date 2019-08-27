@@ -1,65 +1,71 @@
 #!/bin/bash
 
+declare srcdir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+source ${srcdir}/awsutil.sh
+
 user=""
 
 usage ()
 {
-    echo "create-user.sh [-u user]"
+    echo "create-user.sh [-De] user" >&2
     exit 1;
 }
 
 mkdir -p ~/.aws/userdb
 
 delete=0
-while getopts "Du:" OPTION; do
-    case $OPTION in
+usegpg=0
+while getopts "De" arg; do
+    case $arg in
         D)
             delete=1
             ;;
-        u)
-            user=$OPTARG
+        e)
+            if ! test_gpg; then
+                echo "gpg not functioning properly" >&2
+                exit 1
+            fi
+            usegpg=1
             ;;
         *)
-            echo "Error: Bad option $arg"
+            echo "Error: Bad option $arg" >&2
             usage
             ;;
     esac
 done
 shift $((OPTIND-1))
+user=$1
 
-if [[ ! $user ]]; then
-   echo "Error: user name required"
+if (( $# != 1 )); then
+   echo "Error: single user name required" >&2
    usage
 fi
 
-userfile=~/.aws/userdb/$user.json
+userfile=~/.aws/userdb/$user.json.gpg
+
 if [[ -e $userfile ]] && (( ! delete )); then
-   echo "Error: user $user already created"
+   echo "Error: userfile $userfile for $user already created" >&2
    exit 1
 elif [[ ! -e $userfile ]] && (( delete )); then
     if ! aws iam get-user --user-name $user > /dev/null 2>&1; then
-       echo "Error: user $user not created yet"
+       echo "Error: user userfile $userfile and user $user doesn't exist" >&2
        exit 1
     fi
 fi
+
 if (( delete )); then
-    set -e
-    if [[ -e $userfile ]]; then
-       if AKEY="$(jq -r .AccessKey.AccessKeyId ~/.aws/userdb/foobar.json)"; then
-           $(aws iam delete-access-key --user-name $user --access-key-id $AKEY)
-       fi
-    fi
+    declare keys="$(aws iam list-access-keys --user-name $user | jq -r '.AccessKeyMetadata[].AccessKeyId')"
+    for key in $keys; do
+        echo "Deleting access-key $key"
+        aws iam delete-access-key --user-name $user --access-key-id $key
+    done
+    echo "Deleting user $user"
     aws iam delete-user --user-name $user
     rm -f $userfile
     exit 0
 fi
 
 echo "Creating User: $user"
-
-set -e
-USERDATA="$(aws iam create-user --user-name $user)"
-KEYDATA="$(aws iam create-access-key --user-name $user)"
-touch $userfile
-chmod 600 $userfile
-
-echo $USERDATA $KEYDATA | jq -s '.[0] * .[1]' >> $userfile
+(aws iam create-user --user-name $user && aws iam create-access-key --user-name $user) \
+    | jq -s '.[0] * .[1]' | encrypt_pipe $usegpg $userfile
